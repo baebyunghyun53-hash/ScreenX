@@ -2,6 +2,13 @@
 
 A small Python CLI that refreshes a US-listed equity ranking shortly after the US market opens, stores the result locally, and displays the top 100 companies with sector-relative valuation, financial-health, and growth metrics.
 
+## Demo
+
+![market-rank update demo](docs/media/demo.gif)
+![market-rank top demo](docs/media/demo-top.gif)
+
+*Recorded with [VHS](https://github.com/charmbracelet/vhs) by Charm.*
+
 ## Install
 
 ```bash
@@ -31,6 +38,11 @@ market-rank top --limit all # Displays everything.
 # Inspect one company and its sector-relative scores.
 market-rank show MSFT
 
+# Show a correlation matrix of daily returns between stocks.
+market-rank correlate --symbols AAPL,MSFT,NVDA,GOOGL,AMZN
+market-rank correlate --watchlist --period 1y
+market-rank correlate --limit 15 # Top 15 from the current snapshot (default when no --symbols/--watchlist given).
+
 # Keep the process alive; refreshes once on each NYSE trading day at 09:40 ET.
 market-rank run
 
@@ -57,6 +69,44 @@ For every metric, the raw comparison is against the **median valid value in the 
 - PE, forward PE, EV/EBITDA, debt-to-equity and historic PE use `sector median / company` because lower is better.
 
 Negative or zero values are shown as unavailable for ratio-based comparisons where they would be misleading. The composite rank is a winsorized average of available relative scores, plus DCF and analyst-upside contributions; it is a screening signal, not investment advice.
+
+### Low-coverage handling
+
+Some companies have incomplete fundamental data. When a stock has fewer than 7 valid observations for a metric within its sector, ScreenX falls back to the corresponding industry-level average where available. Missing metrics are therefore handled without allowing sparse data to disproportionately affect the composite score.
+
+For example, a low-coverage stock might produce a snapshot like:
+
+| Metric           |   Raw Value | Relative Score |
+| ---------------- | ----------: | -------------: |
+| P/E              |        1.86 |           7.38 |
+| Historic P/E     |        1.86 |           7.38 |
+| Revenue growth   |       30.4% |           1.81 |
+| Earnings growth  |       46.9% |           1.38 |
+| Return on equity |       17.8% |           1.59 |
+| Forward P/E      | Unavailable |              — |
+| Debt-to-equity   | Unavailable |              — |
+| Free cash flow   | Unavailable |              — |
+| DCF upside       | Unavailable |              — |
+| Analyst upside   | Unavailable |              — |
+
+The `coverage` field records how many valid sector observations were available for the stock. Low coverage does not automatically exclude a company, but the resulting score should be interpreted with greater caution.
+
+
+## Correlation matrix
+
+`market-rank correlate` computes the Pearson correlation between daily returns for a set of stocks and prints it as a matrix, to help spot when a watchlist or top-ranked set is more concentrated (highly correlated) than it looks from scores alone.
+
+```bash
+market-rank correlate --symbols AAPL,MSFT,NVDA,GOOGL,AMZN
+market-rank correlate --watchlist --period 1y
+market-rank correlate --limit 15
+```
+
+- Symbols are resolved in this order: explicit `--symbols`, then `--watchlist`, then the top N symbols (`--limit`, default 10) from the current snapshot.
+- `--period` sets the daily-price lookback window passed to yfinance (default `3y`; also accepts values like `6mo`, `1y`, `5y`).
+- Daily price history is pulled in a single batched request per run — this isn't cached the way fundamentals are, since correlation is sensitive to the lookback window and changes day to day.
+- Symbols with no usable price data for the requested period (e.g. recent IPOs shorter than `--period`) are dropped from the matrix and reported separately rather than causing an error.
+- Values range from 1.00 (identical daily movement — always the diagonal) to -1.00 (inverse movement); values near 0 indicate largely unrelated movement.
 
 ## Data notes
 

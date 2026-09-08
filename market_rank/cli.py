@@ -7,10 +7,16 @@ from typing import Any
 import math
 
 from .config import APP_DIR, DEFAULT_OPEN_REFRESH_TIME, FUNDAMENTALS_FILE, FUNDAMENTALS_TTL_DAYS, SNAPSHOT_FILE, UNIVERSE_FILE
-from .metrics import METRICS, display_metrics, normalize_record, score_records
+from .metrics import METRICS, backfill_low_coverage, display_metrics, normalize_record, score_records
 from .market_cap import largest_us_equities
 from .storage import load, now_iso, save
 from .universe import download_us_symbols
+import pandas as pd
+import yfinance as yf
+import pandas as pd
+import pandas_market_calendars as mcal
+from pathlib import Path
+
 
 
 def _fresh(entry: dict[str, Any]) -> bool:
@@ -21,7 +27,6 @@ def _fresh(entry: dict[str, Any]) -> bool:
 
 
 def update(args: argparse.Namespace) -> None:
-    import yfinance as yf
 
     if getattr(args, "watchlist", False):
         from .watchlist import list_watchlist
@@ -71,8 +76,9 @@ def update(args: argparse.Namespace) -> None:
             save(FUNDAMENTALS_FILE, cache)
             print(f"Processed {index}/{len(symbols)} symbols")
 
-
+    backfill_low_coverage(records)
     ranked = score_records(records)
+
     if getattr(args, "watchlist", False):
         universe_label = "your watchlist"
     elif args.market_cap:
@@ -85,9 +91,8 @@ def update(args: argparse.Namespace) -> None:
     save(FUNDAMENTALS_FILE, cache)
     save(SNAPSHOT_FILE, snapshot)
 
-
-    print(f"Saved {len(snapshot['records'])} ranked companies to {SNAPSHOT_FILE}")
-
+    display_path = str(SNAPSHOT_FILE).replace(str(Path.home()), "~")
+    print(f"Saved {len(snapshot['records'])} ranked companies to {display_path}")
 
 def _fmt(value: Any, percent: bool = False) -> str:
     if value is None or (isinstance(value, float) and not math.isfinite(value)):
@@ -105,10 +110,14 @@ def top(args: argparse.Namespace) -> None:
     limit = None if args.limit.lower() == "all" else int(args.limit)
 
     print(f"Snapshot: {snapshot.get('generated_at')} | {snapshot.get('universe', 'US equities')} | ranked {snapshot.get('ranked_count')} of {snapshot.get('universe_size')} symbols")
-    print(f"{'#':>3}  {'Ticker':<7} {'Company':<28} {'Sector':<20} {'Score':>7} {'Coverage':>8}")
+    print("-" * 115)
+    print(f"| {'#':>3} | {'Ticker':<7} | {'Company':<28} | {'Sector':<20} | {'Industry':<20} | {'Score':>7} | {'Coverage':>8} |")
+    print("-" * 115)
+
 
     for rank, row in enumerate(records[:limit], start=1):
-        print(f"{rank:>3}  {row['symbol']:<7} {row['name'][:28]:<28} {row['sector'][:20]:<20} {_fmt(row.get('composite_score')):>7} {row.get('coverage', 0):>8}")
+        print(f"| {rank:>3} | {row['symbol']:<7} | {row['name'][:28]:<28} | {row['sector'][:20]:<20} | {row['industry'][:20]:<20} | {_fmt(row.get('composite_score')):>7} | {row.get('coverage', 0):>8} |")
+    print("-" * 115)
 
 
 def show(args: argparse.Namespace) -> None:
@@ -136,8 +145,6 @@ def show(args: argparse.Namespace) -> None:
 
 
 def run(args: argparse.Namespace) -> None:
-    import pandas as pd
-    import pandas_market_calendars as mcal
 
 
     nyse = mcal.get_calendar("NYSE")
@@ -187,8 +194,11 @@ def watchlist(args: argparse.Namespace) -> None:
 
         if not records:
             raise SystemExit("No snapshot yet. Run: python -m market_rank update")
+        
+        print("-" * 115)
+        print(f"| {'#':>3} | {'Ticker':<7} | {'Company':<28} | {'Sector':<20} | {'Industry':<20} | {'Score':>7} | {'Coverage':>8} |")
+        print("-" * 115)
 
-        print(f"{'#':>3}  {'Ticker':<7} {'Company':<28} {'Sector':<20} {'Score':>7} {'Coverage':>8}")
 
         missing = []
         rank = 0
@@ -198,12 +208,65 @@ def watchlist(args: argparse.Namespace) -> None:
                 missing.append(title)
                 continue
             rank += 1
-            print(f"{rank:>3}  {row['symbol']:<7} {row['name'][:28]:<28} {row['sector'][:20]:<20} {_fmt(row.get('composite_score')):>7} {row.get('coverage', 0):>8}")
+            print(f"| {rank:>3} | {row['symbol']:<7} | {row['name'][:28]:<28} | {row['sector'][:20]:<20} | {row['industry'][:20]:<20} | {_fmt(row.get('composite_score')):>7} | {row.get('coverage', 0):>8} |")
+        print("-" * 115)
+
 
         if missing:
             print(f"\nNot in current snapshot (outside top 100 or not yet ranked): {', '.join(missing)}")
     else:
         print("No action specified. Use --add TICKER, --delete TICKER, --list, or --top.")
+
+def correlate(args: argparse.Namespace) -> None:
+
+    if args.symbols:
+        symbols = [s.upper() for s in args.symbols.split(",")]
+    elif args.watchlist:
+        from .watchlist import list_watchlist
+        rows = list_watchlist()
+        symbols = [title for _id, title, added, watched in rows]
+        if not symbols:
+            raise SystemExit("Watchlist is empty. Add symbols with: market-rank watchlist --add SYMBOL")
+    else:
+        snapshot = load(SNAPSHOT_FILE, {})
+        records = snapshot.get("records", [])
+        if not records:
+            raise SystemExit("No snapshot yet, and no --symbols/--watchlist given. Run: market-rank update")
+        symbols = [r["symbol"] for r in records[:int(args.limit)]]
+
+    if len(symbols) < 2:
+        raise SystemExit("Need at least 2 symbols to compute a correlation matrix.")
+
+    print(f"Fetching {args.period} of daily price history for {len(symbols)} symbols...")
+    data = yf.download(symbols, period=args.period, auto_adjust=False, progress=False)["Close"]
+
+    if isinstance(data, pd.Series):  # yfinance collapses to a Series when only one column survives
+        raise SystemExit("Not enough overlapping price data to compute a correlation matrix.")
+
+    returns = data.pct_change().dropna(how="all")
+    missing = [s for s in symbols if s not in returns.columns or returns[s].dropna().empty]
+    if missing:
+        print(f"No usable price data for: {', '.join(missing)} (skipped)")
+    returns = returns.drop(columns=missing, errors="ignore")
+
+    if returns.shape[1] < 2:
+        raise SystemExit("Not enough symbols with valid price data to compute a correlation matrix.")
+
+    corr = returns.corr()
+    _print_correlation_matrix(corr)
+
+
+def _print_correlation_matrix(corr) -> None:
+    symbols = list(corr.columns)
+    col_width = max(7, max(len(s) for s in symbols) + 1)
+    header = " " * col_width + "".join(f"{s:>{col_width}}" for s in symbols)
+    print(header)
+    print("-" * len(header))
+    for row_symbol in symbols:
+        row = f"{row_symbol:<{col_width}}"
+        for col_symbol in symbols:
+            row += f"{corr.loc[row_symbol, col_symbol]:>{col_width}.2f}"
+        print(row)
 
 
 def main() -> None:
@@ -228,6 +291,13 @@ def main() -> None:
     watchlist_parser.add_argument("--list", action="store_true", help="Show your current watchlist.")
     watchlist_parser.add_argument("--top", action="store_true", help="Show your watchlist's current scores from the latest snapshot.")
     watchlist_parser.set_defaults(func=watchlist)
+
+    correlate_parser = sub.add_parser("correlate", help="Show a correlation matrix of daily returns.")
+    correlate_parser.add_argument("--symbols", help="Comma-separated tickers, e.g. AAPL,MSFT,NVDA.")
+    correlate_parser.add_argument("--watchlist", action="store_true", help="Use your watchlist symbols.")
+    correlate_parser.add_argument("--limit", default="10", help="If neither --symbols nor --watchlist given, use the top N from the current snapshot.")
+    correlate_parser.add_argument("--period", default="3y", help="History window: 6mo, 1y, 3y, 5y, etc.")
+    correlate_parser.set_defaults(func=correlate)
 
     args = parser.parse_args()
     args.func(args)

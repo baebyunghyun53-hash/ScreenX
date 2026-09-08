@@ -17,23 +17,21 @@ def _read_directory(url: str) -> pd.DataFrame:
 
 
 def download_us_symbols() -> list[str]:
-    """Return tradable US equity symbols understood by Yahoo Finance.
+    """Return tradable US equity symbols understood by Yahoo Finance, limited
+    to NYSE and Nasdaq listings.
 
-    Nasdaq Trader lists all Nasdaq and other US exchange listings. Dot class-share
-    symbols are converted to Yahoo's dash convention (BRK.B -> BRK-B).
+    Dot class-share symbols are converted to Yahoo's dash convention (BRK.B -> BRK-B).
     """
     nasdaq = _read_directory(NASDAQ_LISTED)
     other = _read_directory(OTHER_LISTED)
-
 
     nasdaq_symbols = nasdaq.loc[
         (nasdaq["Test Issue"] == "N") & (nasdaq["ETF"] == "N"), "Symbol"
     ]
     other_symbols = other.loc[
-        (other["Test Issue"] == "N") & (other["ETF"] == "N"), "ACT Symbol"
+        (other["Test Issue"] == "N") & (other["ETF"] == "N") & (other["Exchange"] == "N"), "ACT Symbol"
     ]
 
-    
     symbols = pd.concat([nasdaq_symbols, other_symbols]).dropna().astype(str)
     # Keep standard common-equity ticker forms. Warrants/units/preferreds have
     # non-standard suffixes and make fundamentally comparable ranking unreliable.
